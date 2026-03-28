@@ -1,6 +1,6 @@
 # TCP-preconnection-relay
 
-高性能 TCP/UDP 转发器（带预连接加速）
+高性能TCP/UDP转发器，类似于realm那种
 
 ---
 
