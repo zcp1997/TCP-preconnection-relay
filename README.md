@@ -63,7 +63,7 @@ systemctl enable tcp-pool@us
 systemctl status tcp-pool@us
 ```
 
-如果看到：
+如果看到一堆：
 
 ```
 Preconnect +1
