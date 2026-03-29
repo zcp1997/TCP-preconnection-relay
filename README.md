@@ -129,6 +129,10 @@ REMOTE_IP:REMOTE_TCP_PORT
 
 * 测试环境为上海移动，日本优化线路为gomami，美国西雅图落地为Bug Net（名字懒得改了），可见在转发路径高rtt情况下有明显的延时下降，同时单线程速率表现良好，和其它转发无异。
 
+* 喜欢的话给我买包辣条
+  ![9adcde3609909e156269a442b1bb7a74](https://github.com/user-attachments/assets/db47e0b6-fa08-4a2b-9798-e956da83df0e)
+
+
 * 日本优化Gomami：https://www.gomami.io (贵，无aff）
 * 美国西雅图落地：https://www.misaka.io (贵，无aff，商家也没开aff功能，国际互联非常优秀，但是日本到这家因为ddos，最近不太稳定）
 * 美国西雅图落地：https://bug.pw?ref=Nifwr0tPxf （便宜点，日本过去延时稳定82ms，带宽现在比misaka足且稳定，所以有aff）
