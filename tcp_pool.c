@@ -154,7 +154,7 @@ static int resolve_addr(const char *host, int port, int socktype,
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;      // v4 / v6 都行
     hints.ai_socktype = socktype;
-    hints.ai_flags = AI_NUMERICSERV;
+    hints.ai_flags = AI_NUMERICSERV | AI_PASSIVE;
 
     snprintf(portstr, sizeof(portstr), "%d", port);
 
