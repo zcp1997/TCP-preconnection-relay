@@ -45,8 +45,9 @@ case "$CLEAR_OLD" in
         ;;
 esac
 
+if [ ! -f /etc/tcp_pool/relays.conf ]; then
 cat > /etc/tcp_pool/relays.conf <<'EOF'
-#REQUIRED
+#注意注释不能打在行尾，会解析失败，亲身踩坑
 #转发标识，中括号内填写标签，比如US,HK1,HK2
 [US]
 #本地ip，如果监听v4网卡就填写0.0.0.0。如果是v6则为俩英文冒号::。只监听本机某个特定网卡ip就填那个ip就行，比如127.0.0.0，38.175.100.122。
@@ -75,6 +76,7 @@ REMOTE_IP=域名.com
 REMOTE_TCP_PORT=8888
 REMOTE_UDP_PORT=9999
 EOF
+fi
 
 cat > /usr/local/bin/tcp-pool-parse <<'EOF'
 #!/bin/bash
@@ -86,6 +88,8 @@ DST="/etc/tcp_pool"
 [ -f "$SRC" ] || { echo "缺少 $SRC"; exit 1; }
 
 mkdir -p "$DST"
+
+find "$DST" -maxdepth 1 -type f -name '*.conf' ! -name 'relays.conf' -delete
 
 current=""
 declare -A section_seen
@@ -231,9 +235,55 @@ EOF
 
 systemctl daemon-reload
 
-true
+cat > /usr/local/bin/tcp-pool-start <<'EOF'
+#!/bin/bash
+set -euo pipefail
+tcp-pool-parse
 
-systemctl daemon-reload
+mapfile -t old_units < <(
+    {
+        systemctl list-units --full --all --no-legend 'tcp-pool@*.service' 2>/dev/null | awk '{print $1}'
+        systemctl list-unit-files --full --no-legend 'tcp-pool@*.service' 2>/dev/null | awk '{print $1}'
+    } | sort -u
+)
+
+for unit in "${old_units[@]}"; do
+    [ -n "$unit" ] || continue
+    systemctl stop "$unit" 2>/dev/null || true
+    systemctl disable "$unit" 2>/dev/null || true
+done
+
+shopt -s nullglob
+confs=(/etc/tcp_pool/*.conf)
+
+instances=()
+for conf in "${confs[@]}"; do
+    name="$(basename "$conf")"
+    [[ "$name" == "relays.conf" ]] && continue
+    [[ "$name" != *.conf ]] && continue
+    instances+=("${name%.conf}")
+done
+
+if [ "${#instances[@]}" -eq 0 ]; then
+    echo "没有可启动的转发实例，请检查 /etc/tcp_pool/relays.conf"
+    exit 1
+fi
+
+for inst in "${instances[@]}"; do
+    echo "正在启动并设置开机自启 tcp-pool@$inst ..."
+    systemctl enable "tcp-pool@$inst"
+    systemctl restart "tcp-pool@$inst"
+done
+
+echo ""
+echo "全部实例已启用完成。"
+echo "查看日志命令："
+for inst in "${instances[@]}"; do
+    echo "journalctl -u tcp-pool@$inst -f"
+done
+EOF
+
+chmod +x /usr/local/bin/tcp-pool-start
 
 echo ""
 echo "========================================"
@@ -245,21 +295,40 @@ case "$EDIT_NOW" in
     n|N)
         echo "之后可以输入以下命令修改配置文件，记得存一下哦："
         echo "nano /etc/tcp_pool/relays.conf"
-        echo "之后可以输入以下命令解析配置，记得存一下哦："
-        echo "tcp-pool-parse"
+        echo "之后如果要启动/重启全部转发，可以输入以下命令："
+        echo "tcp-pool-start"
         ;;
     *)
         nano /etc/tcp_pool/relays.conf
 
-        read -r -p "是否现在解析配置？ [Y/n]: " PARSE_NOW
-        case "$PARSE_NOW" in
+        read -r -p "是否现在应用配置并启动全部转发？ [Y/n]: " START_NOW
+        case "$START_NOW" in
             n|N)
-                echo "之后输入以下命令解析配置，记得存一下哦："
-                echo "tcp-pool-parse"
+                echo "之后如果要启动/重启全部转发，可以输入以下命令："
+                echo "tcp-pool-start"
                 ;;
             *)
-                tcp-pool-parse
+                tcp-pool-start
                 ;;
         esac
         ;;
 esac
+echo ""
+echo "========================================"
+echo " 常用命令说明"
+echo "========================================"
+echo "修改配置文件："
+echo "nano /etc/tcp_pool/relays.conf"
+echo ""
+echo "应用配置并启动/重启全部转发："
+echo "tcp-pool-start"
+echo ""
+echo "停止某个实例（把 HK 改成你自己的标签）："
+echo "systemctl stop tcp-pool@HK"
+echo ""
+echo "禁用某个实例开机自启（把 HK 改成你自己的标签）："
+echo "systemctl disable tcp-pool@HK"
+echo ""
+echo "查看某个实例日志（把 HK 改成你自己的标签）："
+echo "journalctl -u tcp-pool@HK -f"
+echo "========================================"
