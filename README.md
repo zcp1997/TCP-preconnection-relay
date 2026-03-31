@@ -6,7 +6,7 @@
 
 ## 安装
 
-一键安装：
+一键安装（脚本指令已更新）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Xeloan/TCP-preconnection-relay/main/install.sh -o install.sh && bash install.sh
