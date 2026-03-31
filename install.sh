@@ -48,18 +48,12 @@ esac
 if [ ! -f /etc/tcp_pool/relays.conf ]; then
 cat > /etc/tcp_pool/relays.conf <<'EOF'
 #注意注释不能打在行尾，会解析失败，亲身踩坑
-#转发标识，中括号内填写标签，比如US,HK1,HK2
-[US]
-#本地ip，如果监听v4网卡就填写0.0.0.0。如果是v6则为俩英文冒号::。只监听本机某个特定网卡ip就填那个ip就行，比如127.0.0.0，38.175.100.122。
-LOCAL_IP=
-#本地端口，记得ufw或者服务商的防火墙打开
-LOCAL_PORT=
-#远端ip，你转发的目标服务器，现在支持v6和域名
-REMOTE_IP=
-#远端的接收TCP的端口
-REMOTE_TCP_PORT=
-#远端的接收UDP的端口（如果你的服务端UDP和TCP跑在一个端口的，填写一样就行）
-REMOTE_UDP_PORT=
+#[US] 转发标识，中括号内填写标签，比如US,HK1,HK2
+#LOCAL_IP= 本地ip，如果监听v4网卡就填写0.0.0.0。如果是v6则为俩英文冒号::。只监听本机某个特定网卡ip就填那个ip就行，比如127.0.0.0，38.175.100.122。
+#LOCAL_PORT= 本地端口，记得ufw或者服务商的防火墙打开
+#REMOTE_IP= 远端ip，你转发的目标服务器，现在支持v6和域名
+#REMOTE_TCP_PORT= 远端的接收TCP的端口
+#REMOTE_UDP_PORT= 远端的接收UDP的端口（如果你的服务端UDP和TCP跑在一个端口的，填写一样就行）
 
 #样例，看懂了删掉就行(ctrl k 快速一行行清除，小小白白可能不知道)。现在支持单文件多配置，格式就是标签加上后面一坨东西。
 [JP]
@@ -329,6 +323,6 @@ echo ""
 echo "禁用某个实例开机自启（把 HK 改成你自己的标签）："
 echo "systemctl disable tcp-pool@HK"
 echo ""
-echo "查看某个实例日志（把 HK 改成你自己的标签）："
+echo "查看某个实例日志（把 HK 改成你自己的标签），如果看到一坨Preconnect +1，说明成了："
 echo "journalctl -u tcp-pool@HK -f"
 echo "========================================"
