@@ -12,6 +12,13 @@
 curl -fsSL https://raw.githubusercontent.com/Xeloan/TCP-preconnection-relay/main/install.sh | bash
 ```
 
+## 更新日志
+
+v1.3 增加了出入站v4和v6支持，出站还支持使用域名。同时实现了单配置多转发，更加方便。旧版的友友们注意按照指南清空下配置。
+
+## 指南
+安装过程中会有保姆级指南。
+
 ## 效果示例
 
 * 无预链接的转发（使用realm）：
