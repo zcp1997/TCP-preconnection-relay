@@ -34,6 +34,8 @@ static char *REMOTE_IP;
 static int REMOTE_TCP_PORT; //目标服务器TCP端口
 static int REMOTE_UDP_PORT; //目标服务器UDP端口
 
+#define DNS_POLL_INTERVAL 30  // 每隔多少秒重新解析一次域名（DDNS 刷新间隔）
+
 #define POOL_SIZE       24 //连接池大小
 #define REFILL_BATCH    8 //预链接池补充最大线程
 #define CONNECT_TIMEOUT 5
@@ -48,6 +50,10 @@ static int REMOTE_UDP_PORT; //目标服务器UDP端口
 #define TAG_UDP_ASSOC   ((uintptr_t)2)   
 #define TAG_MASK2       ((uintptr_t)3)   
 #define TAG_UDP_LISTEN  ((void*)4)       
+
+// DDNS 支持：地址读写锁 + 变更代数
+static pthread_rwlock_t addr_lock = PTHREAD_RWLOCK_INITIALIZER;
+static volatile int dns_generation = 0;   // 每次 IP 变化 +1，通知主循环
 
 static bool LOG_ENABLE = true;     //日志开关，懒，就做了一档
 #define LOG_RATE_PER_SEC 24        //每秒最多输出 24 条，多余排队
@@ -146,6 +152,15 @@ static void log_flush_all_force(void) {
 }
 
 //工具函数
+static void addr_to_str(const struct sockaddr_storage *addr, char *buf, size_t buflen) {
+    if (addr->ss_family == AF_INET)
+        inet_ntop(AF_INET,  &((const struct sockaddr_in *)addr)->sin_addr,  buf, (socklen_t)buflen);
+    else if (addr->ss_family == AF_INET6)
+        inet_ntop(AF_INET6, &((const struct sockaddr_in6*)addr)->sin6_addr, buf, (socklen_t)buflen);
+    else
+        snprintf(buf, buflen, "unknown");
+}
+
 static int resolve_addr(const char *host, int port, int socktype,
                         struct sockaddr_storage *out, socklen_t *outlen) {
     struct addrinfo hints, *res = NULL, *rp = NULL;
@@ -262,13 +277,20 @@ static void *thread_refill(void *arg) {//连接线程补充
     (void)arg;
 //打个标，我在这改过，防止忘了
 
-    int s = socket(((struct sockaddr*)&remote_tcp_addr)->sa_family, SOCK_STREAM, 0);
+    // 拍快照：持读锁复制地址，避免 DDNS 刷新时的竞态
+    pthread_rwlock_rdlock(&addr_lock);
+    struct sockaddr_storage snap_tcp_addr = remote_tcp_addr;
+    socklen_t snap_tcp_addrlen = remote_tcp_addrlen;
+    int snap_gen = dns_generation;
+    pthread_rwlock_unlock(&addr_lock);
+
+    int s = socket(((struct sockaddr*)&snap_tcp_addr)->sa_family, SOCK_STREAM, 0);
     if (s < 0) goto fin;
 
     set_tcp_socket_options(s);
     if (set_nonblock(s) != 0) { close(s); goto fin; }
 
-    int rc = connect(s, (struct sockaddr*)&remote_tcp_addr, remote_tcp_addrlen);
+    int rc = connect(s, (struct sockaddr*)&snap_tcp_addr, snap_tcp_addrlen);
     if (rc == 0) goto success;
     if (errno != EINPROGRESS) { close(s); goto fin; }
 
@@ -288,6 +310,15 @@ success: {
     pthread_mutex_lock(&pool_mtx);
 
     pending_cnt--;
+
+    // 如果连接过程中 DDNS 已经刷新，这个 socket 指向旧 IP，直接丢掉
+    if (snap_gen != dns_generation) {
+        close(s);
+        log_enqueue("Preconnect discarded (DDNS changed during connect)");
+        pthread_mutex_unlock(&pool_mtx);
+        return NULL;
+    }
+
     bool ok = pool_put_locked(s, now);
     if (ok) log_enqueue("Preconnect +1，Current: %d/%d (Pending: %d)", pool_count, POOL_SIZE, pending_cnt);
     else log_enqueue("Preconnected Too Much, Clearing ...");
@@ -341,6 +372,67 @@ static void *thread_maintain(void *arg) {//自动补充连接，以及连接每5
 
         pthread_mutex_unlock(&pool_mtx);
         usleep(50000);
+    }
+    return NULL;
+}
+
+// DDNS 监听线程：定期重新解析域名，IP 变化时原地热更新地址
+static void *thread_dns_watch(void *arg) {
+    (void)arg;
+
+    // 只有 REMOTE_IP 是域名时才有意义，纯 IP 也无害（相等直接跳过）
+    while (1) {
+        sleep(DNS_POLL_INTERVAL);
+
+        struct sockaddr_storage new_tcp = {0}, new_udp = {0};
+        socklen_t new_tcp_len = 0, new_udp_len = 0;
+
+        if (resolve_addr(REMOTE_IP, REMOTE_TCP_PORT, SOCK_STREAM, &new_tcp, &new_tcp_len) != 0) {
+            log_enqueue("DDNS: resolve TCP failed, keeping old address");
+            continue;
+        }
+        if (resolve_addr(REMOTE_IP, REMOTE_UDP_PORT, SOCK_DGRAM, &new_udp, &new_udp_len) != 0) {
+            log_enqueue("DDNS: resolve UDP failed, keeping old address");
+            continue;
+        }
+
+        // 读锁下检查是否有变化
+        pthread_rwlock_rdlock(&addr_lock);
+        bool changed = (new_tcp_len != remote_tcp_addrlen ||
+                        memcmp(&new_tcp, &remote_tcp_addr, new_tcp_len) != 0);
+        pthread_rwlock_unlock(&addr_lock);
+
+        if (!changed) continue;
+
+        // 打印新旧 IP
+        char old_str[INET6_ADDRSTRLEN] = {0}, new_str[INET6_ADDRSTRLEN] = {0};
+        pthread_rwlock_rdlock(&addr_lock);
+        addr_to_str(&remote_tcp_addr, old_str, sizeof(old_str));
+        pthread_rwlock_unlock(&addr_lock);
+        addr_to_str(&new_tcp, new_str, sizeof(new_str));
+        log_enqueue("DDNS: IP changed %s -> %s, hot-updating...", old_str, new_str);
+
+        // 写锁：原子替换地址
+        pthread_rwlock_wrlock(&addr_lock);
+        remote_tcp_addr    = new_tcp;
+        remote_tcp_addrlen = new_tcp_len;
+        remote_udp_addr    = new_udp;
+        remote_udp_addrlen = new_udp_len;
+        pthread_rwlock_unlock(&addr_lock);
+
+        // 清空预连接池（这些 socket 全部指向旧 IP，不能再用）
+        pthread_mutex_lock(&pool_mtx);
+        for (int i = 0; i < pool_count; i++) {
+            close(pool[i].fd);
+        }
+        pool_count = 0;
+        // pending_cnt 里的连接线程读到快照，完成后会因 generation 不符被丢弃
+        pthread_mutex_unlock(&pool_mtx);
+
+        // 递增代数，通知主 epoll 循环关闭活跃连接和 UDP 关联
+        __sync_fetch_and_add(&dns_generation, 1);
+
+        log_enqueue("DDNS: pool drained, signaling main loop to reset connections");
     }
     return NULL;
 }
@@ -492,11 +584,17 @@ static UdpAssoc* udp_get_or_create(const struct sockaddr_storage *cli,
         p = p->next;
     }
 
-    int fd = socket(((struct sockaddr*)&remote_udp_addr)->sa_family, SOCK_DGRAM, 0);
+    // 拍快照（读锁），避免 DDNS 线程并发写时的竞态
+    pthread_rwlock_rdlock(&addr_lock);
+    struct sockaddr_storage snap_udp = remote_udp_addr;
+    socklen_t snap_udp_len = remote_udp_addrlen;
+    pthread_rwlock_unlock(&addr_lock);
+
+    int fd = socket(((struct sockaddr*)&snap_udp)->sa_family, SOCK_DGRAM, 0);
     if (fd < 0) return NULL;
     set_udp_socket_options(fd);
     if (set_nonblock(fd) != 0) { close(fd); return NULL; }
-    if (connect(fd, (struct sockaddr*)&remote_udp_addr, remote_udp_addrlen) != 0) { close(fd); return NULL; }
+    if (connect(fd, (struct sockaddr*)&snap_udp, snap_udp_len) != 0) { close(fd); return NULL; }
 
     UdpAssoc *n = (UdpAssoc*)calloc(1, sizeof(UdpAssoc));
     if (!n) { close(fd); return NULL; }
@@ -582,6 +680,11 @@ int main() {
     pthread_create(&t_m, NULL, thread_maintain, NULL);
     pthread_detach(t_m);
 
+    // DDNS 监听线程（纯 IP 的配置几乎无开销，重新解析直接相等跳过）
+    pthread_t t_dns;
+    pthread_create(&t_dns, NULL, thread_dns_watch, NULL);
+    pthread_detach(t_dns);
+
     epfd = epoll_create1(0);
     if (epfd < 0) { log_enqueue("socket listen failed"); log_flush_all_force(); return 1; }
 
@@ -659,12 +762,18 @@ int main() {
 
 //打个标
 
-                        rem = socket(((struct sockaddr*)&remote_tcp_addr)->sa_family, SOCK_STREAM, 0);
+                        // 读锁拷贝当前地址（DDNS 可能随时更新）
+                        pthread_rwlock_rdlock(&addr_lock);
+                        struct sockaddr_storage fb_tcp_addr = remote_tcp_addr;
+                        socklen_t fb_tcp_addrlen = remote_tcp_addrlen;
+                        pthread_rwlock_unlock(&addr_lock);
+
+                        rem = socket(((struct sockaddr*)&fb_tcp_addr)->sa_family, SOCK_STREAM, 0);
                         if (rem < 0) { close(cli); continue; }
                         set_tcp_socket_options(rem);
                         if (set_nonblock(rem) != 0) { close(rem); close(cli); continue; }
                         //fallback这里问题调整了一下///////////////////////////////////QAQ
-                        int rc = connect(rem, (struct sockaddr*)&remote_tcp_addr, remote_tcp_addrlen);
+                        int rc = connect(rem, (struct sockaddr*)&fb_tcp_addr, fb_tcp_addrlen);
                         if (rc != 0) {
                             if (errno != EINPROGRESS) {
                                 close(rem);
@@ -814,6 +923,33 @@ int main() {
             if (st2 == PUMP_ERR) { log_enqueue("Connection Closed Accidentally: Remote->Local"); conn_close(c); continue; }
 
             conn_watch(c);
+        }
+
+        // DDNS 热更新：检测 dns_generation 变化，关闭全部活跃 TCP 连接和 UDP 关联
+        // 旧 IP 下的连接已无意义，让客户端重连即可
+        static int last_dns_gen = 0;
+        int cur_dns_gen = __sync_fetch_and_add(&dns_generation, 0);
+        if (cur_dns_gen != last_dns_gen) {
+            last_dns_gen = cur_dns_gen;
+            log_enqueue("DDNS: resetting all active TCP connections and UDP associations");
+
+            // 关闭全部活跃 TCP 连接
+            Conn *dc = conn_list;
+            while (dc) {
+                conn_close(dc);
+                dc = dc->next;
+            }
+            // conn_list 里的 Conn 会在下面的 1s 清扫中被 free，这里只标 closed
+
+            // 关闭全部 UDP 关联（connect 到旧 IP 的 socket 全部作废）
+            for (uint32_t di = 0; di < UDP_TABLE_SIZE; di++) {
+                UdpAssoc *pu = udp_tab[di];
+                while (pu) {
+                    UdpAssoc *nxt = pu->next;
+                    udp_remove(pu, di, epfd);
+                    pu = nxt;
+                }
+            }
         }
 
         //每秒清理僵尸连接和半连接
