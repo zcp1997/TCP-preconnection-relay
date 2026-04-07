@@ -11,7 +11,7 @@
 一键安装（脚本指令已更新，请重新复制）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Xeloan/TCP-preconnection-relay/main/install.sh -o install.sh && bash install.sh
+curl -fsSL https://raw.githubusercontent.com/zcp1997/TCP-preconnection-relay/main/install.sh -o install.sh && bash install.sh
 ```
 
 ## 更新日志
