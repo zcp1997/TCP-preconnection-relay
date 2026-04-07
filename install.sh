@@ -8,7 +8,7 @@ apt update
 apt install -y nano curl build-essential
 
 curl -L -o /root/tcp_pool.c \
-https://raw.githubusercontent.com/Xeloan/TCP-preconnection-relay/main/tcp_pool.c
+https://raw.githubusercontent.com/zcp1997/TCP-preconnection-relay/main/tcp_pool.c
 
 gcc -O2 -pthread -march=native -o /root/tcp_pool /root/tcp_pool.c
 
